@@ -2,16 +2,18 @@ use anyhow::Context;
 use axum::Router;
 use axum::extract::Json;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use axum::response::IntoResponse;
-use axum::response::Response;
+use tempfile::NamedTempFile;
+use tokio::net::TcpListener;
+use tokio::process::Command;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let router = Router::new().route("/", post(generate_pdf));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+    let listener = TcpListener::bind("0.0.0.0:8080")
         .await
         .context("bind port for api server")?;
     axum::serve(listener, router)
@@ -98,11 +100,9 @@ pub struct Gender {
     pub account_holder: String,
 }
 
-async fn generate_pdf(
-    Json(invoice): Json<Invoice>,
-) -> Result<axum::response::Response, AppError> {
+async fn generate_pdf(Json(invoice): Json<Invoice>) -> Result<Response, AppError> {
     println!("{invoice:#?}");
-    let mut json_file = tempfile::NamedTempFile::new_in("./")?;
+    let mut json_file = NamedTempFile::new_in("./")?;
     let path = json_file
         .path()
         .strip_prefix(std::env::current_dir().expect("get working dir"))
@@ -113,7 +113,7 @@ async fn generate_pdf(
 
     let mut path_arg = OsString::from("json=");
     path_arg.push(path);
-    let output = tokio::process::Command::new("typst")
+    let output = Command::new("typst")
         .arg("compile")
         .arg("invoice.typ")
         .arg("--input")
@@ -131,7 +131,7 @@ async fn generate_pdf(
         Err(anyhow::anyhow!("typst failed"))?;
     }
 
-    let response = axum::response::Response::builder()
+    let response = Response::builder()
         .status(200)
         .header("Content-Type", "application/pdf")
         .body(output.stdout.into())
