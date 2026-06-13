@@ -5,7 +5,8 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-use tokio::io::AsyncWriteExt;
+use axum::response::IntoResponse;
+use axum::response::Response;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,6 +19,27 @@ async fn main() -> anyhow::Result<()> {
         .context("run api server")?;
 
     Ok(())
+}
+
+struct AppError(anyhow::Error);
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Something went wrong: {}", self.0),
+        )
+            .into_response()
+    }
+}
+
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,18 +100,16 @@ pub struct Gender {
 
 async fn generate_pdf(
     Json(invoice): Json<Invoice>,
-) -> Result<axum::response::Response, axum::response::ErrorResponse> {
+) -> Result<axum::response::Response, AppError> {
     println!("{invoice:#?}");
-    let mut json_file = tempfile::NamedTempFile::new_in("./")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut json_file = tempfile::NamedTempFile::new_in("./")?;
     let path = json_file
         .path()
         .strip_prefix(std::env::current_dir().expect("get working dir"))
         .expect("strip prefix")
         .to_owned();
 
-    serde_json::to_writer(json_file.as_file_mut(), &invoice)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    serde_json::to_writer(json_file.as_file_mut(), &invoice)?;
 
     let mut path_arg = OsString::from("json=");
     path_arg.push(path);
@@ -100,8 +120,7 @@ async fn generate_pdf(
         .arg(path_arg)
         .arg("-")
         .output()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .await?;
 
     if !output.status.success() {
         eprintln!(
@@ -109,7 +128,7 @@ async fn generate_pdf(
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
-        Err((StatusCode::INTERNAL_SERVER_ERROR, "typst failed"))?;
+        Err(anyhow::anyhow!("typst failed"))?;
     }
 
     let response = axum::response::Response::builder()
