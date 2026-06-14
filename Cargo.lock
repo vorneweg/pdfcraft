@@ -1885,7 +1885,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "typst",
+ "typst-eval",
  "typst-kit",
+ "typst-layout",
  "typst-pdf",
 ]
 
