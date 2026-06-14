@@ -154,3 +154,79 @@ impl<'a> TypstWorld for WorldWithDataOverlay<'a> {
         self.world.today(offset)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::World;
+    use crate::model::EXAMPLE_DATA;
+
+    use serde::Serialize;
+    use typst::{
+        World as _,
+        comemo::Track,
+        engine::{Engine, Route, Sink, Traced},
+        foundations::{StyleChain, Target, TargetElem, Value},
+        introspection::Introspector,
+    };
+    use typst_pdf::{PdfOptions, pdf};
+
+    const DUMMY_TEMPLATE: &str = include_str!("dummy.typ");
+
+    fn into_value_serde(from: impl Serialize) -> Value {
+        let json_value = serde_json::to_value(from).unwrap();
+        serde_json::from_value(json_value).unwrap()
+    }
+
+    #[test]
+    fn typst_minimal() {
+        // parse
+        let world = World::init(DUMMY_TEMPLATE).unwrap();
+        let main = world.main.clone();
+        let world = (&world as &dyn typst::World).track();
+
+        let mut sink = Sink::new();
+        let traced = Traced::default();
+        let module = typst_eval::eval(
+            &typst::ROUTINES,
+            world,
+            traced.track(),
+            sink.track_mut(),
+            Route::default().track(),
+            &main,
+        )
+        .unwrap();
+
+        let Value::Func(invoice) = module.field("invoice", ()).unwrap() else {
+            panic!("invalid field type");
+        };
+
+        let introspector = Introspector::default();
+        let constraint = typst::comemo::Constraint::new();
+        let mut engine = Engine {
+            world,
+            introspector: introspector.track_with(&constraint),
+            traced: traced.track(),
+            sink: sink.track_mut(),
+            route: Route::default(),
+            routines: &typst::ROUTINES,
+        };
+
+        let context = typst::foundations::Context::default();
+        let args = [into_value_serde(&*EXAMPLE_DATA)];
+        let Value::Content(content) = invoice.call(&mut engine, context.track(), args).unwrap()
+        else {
+            panic!("return value was not content")
+        };
+
+        let library = world.library();
+        let base = StyleChain::new(&library.styles);
+        let target = TargetElem::target.set(Target::Paged).wrap();
+        let styles = base.chain(&target);
+
+        let doc = typst_layout::layout_document(&mut engine, &content, styles).unwrap();
+        let out = pdf(&doc, &PdfOptions::default()).unwrap();
+        fs::write("dummy.pdf", out).unwrap();
+    }
+}
