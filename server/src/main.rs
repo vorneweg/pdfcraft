@@ -1,18 +1,50 @@
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use axum::Router;
-use axum::extract::Json;
+use axum::extract::{FromRequestParts, Json, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use serde::{Deserialize, Serialize};
-use std::ffi::OsString;
-use tempfile::NamedTempFile;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::{iter, time};
 use tokio::net::TcpListener;
-use tokio::process::Command;
+use typst::foundations::Bytes;
+use typst::layout::PagedDocument;
+use typst::syntax::VirtualPath;
+use typst_pdf::{PdfOptions, pdf};
+
+use crate::typstadapt::{World, WorldWithDataOverlay};
+
+mod model;
+mod typstadapt;
+
+const INVOICE_TEMPLATE: &str = include_str!("template.typ");
+
+pub struct App {
+    world: World,
+}
+
+#[derive(Clone, FromRequestParts)]
+#[from_request(via(State))]
+pub struct AppState(pub Arc<App>);
+
+// deref so you can still access the inner fields easily
+impl Deref for AppState {
+    type Target = App;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let router = Router::new().route("/", post(generate_pdf));
+    let typst_world = typstadapt::World::init(INVOICE_TEMPLATE)?;
+
+    eprintln!("starting API server");
+    let router = Router::new()
+        .route("/", post(generate_pdf))
+        .with_state(AppState(Arc::new(App { world: typst_world })));
     let listener = TcpListener::bind("0.0.0.0:8080")
         .await
         .context("bind port for api server")?;
@@ -44,97 +76,42 @@ where
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Invoice {
-    pub number: String,
-    pub date: Date,
-    pub items: Vec<Item>,
-    pub author: Person,
-    pub recipient: Address,
-    pub bank_account: BankAccount,
-    pub vat: f64,
-    pub kleinunternehmer: bool,
-}
+async fn generate_pdf(
+    state: AppState,
+    Json(invoice): Json<model::Invoice>,
+) -> Result<Response, AppError> {
+    let start = time::Instant::now();
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Date {
-    pub year: u32,
-    pub month: u32,
-    pub day: u32,
-}
+    let payload = serde_json::to_vec(&invoice)?;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Item {
-    pub description: String,
-    pub price: f64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Person {
-    pub name: String,
-    pub street: String,
-    pub zip: String,
-    pub city: String,
-    pub tax_nr: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Address {
-    pub name: String,
-    pub street: String,
-    pub zip: String,
-    pub city: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BankAccount {
-    pub name: String,
-    pub bank: String,
-    pub iban: String,
-    pub bic: String,
-    pub gender: Gender,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Gender {
-    pub account_holder: String,
-}
-
-async fn generate_pdf(Json(invoice): Json<Invoice>) -> Result<Response, AppError> {
-    println!("{invoice:#?}");
-    let mut json_file = NamedTempFile::new_in("./")?;
-    let path = json_file
-        .path()
-        .strip_prefix(std::env::current_dir().expect("get working dir"))
-        .expect("strip prefix")
-        .to_owned();
-
-    serde_json::to_writer(json_file.as_file_mut(), &invoice)?;
-
-    let mut path_arg = OsString::from("json=");
-    path_arg.push(path);
-    let output = Command::new("typst")
-        .arg("compile")
-        .arg("invoice.typ")
-        .arg("--input")
-        .arg(path_arg)
-        .arg("-")
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        eprintln!(
-            "typst failed: {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
+    // typst compile & export are not async, run them on a special thread
+    let out = tokio::task::spawn_blocking(move || {
+        let data_world = WorldWithDataOverlay::new(
+            &state.world,
+            [(VirtualPath::new("inputs"), Bytes::new(payload))],
         );
-        Err(anyhow::anyhow!("typst failed"))?;
-    }
+
+        // todo: don't swallow warnings
+        let doc = typst::compile::<PagedDocument>(&data_world)
+            .output
+            .map_err(|diags| anyhow!("failed to compile: {diags:?}"))?;
+        eprintln!(
+            "compile took {}ms, exporting to pdf",
+            start.elapsed().as_millis()
+        );
+
+        pdf(&doc, &PdfOptions::default())
+            .map_err(|diags| anyhow!("failed to export pdf: {diags:?}"))
+    })
+    .await??;
 
     let response = Response::builder()
         .status(200)
         .header("Content-Type", "application/pdf")
-        .body(output.stdout.into())
+        .body(out.into())
         .expect("build http response");
+
+    eprintln!("Responded in {}ms", start.elapsed().as_millis());
+
     Ok(response)
 }
