@@ -84,7 +84,7 @@ async fn generate_pdf(
 
     let payload = serde_json::to_vec(&invoice)?;
 
-    // typst compile & export are not async, run them on a special
+    // typst compile & export are not async, run them on a special thread
     let out = tokio::task::spawn_blocking(move || {
         let data_world = WorldWithDataOverlay::new(
             &state.world,
