@@ -88,7 +88,7 @@ async fn generate_pdf(
     let out = tokio::task::spawn_blocking(move || {
         let data_world = WorldWithDataOverlay::new(
             &state.world,
-            iter::once((VirtualPath::new("inputs"), Bytes::new(payload))),
+            [(VirtualPath::new("inputs"), Bytes::new(payload))],
         );
 
         // todo: don't swallow warnings
