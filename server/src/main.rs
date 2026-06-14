@@ -77,7 +77,7 @@ where
 }
 
 async fn generate_pdf(
-    State(state): State<AppState>,
+    state: AppState,
     Json(invoice): Json<model::Invoice>,
 ) -> Result<Response, AppError> {
     let start = time::Instant::now();
